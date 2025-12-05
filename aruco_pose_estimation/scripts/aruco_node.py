@@ -181,7 +181,7 @@ class ArucoNode(rclpy.node.Node):
                                                      distortion_coefficients=self.distortion, pose_array=pose_array, markers=markers)
 
         # if some markers are detected
-        if len(markers.marker_ids) > 0:
+        if len(markers.markers) > 0:
             # Publish the results with the poses and markes positions
             self.poses_pub.publish(pose_array)
             self.markers_pub.publish(markers)
@@ -222,7 +222,7 @@ class ArucoNode(rclpy.node.Node):
                                                      distortion_coefficients=self.distortion, pose_array=pose_array, markers=markers)
 
         # if some markers are detected
-        if len(markers.marker_ids) > 0:
+        if len(markers.markers) > 0:
             # Publish the results with the poses and markes positions
             self.poses_pub.publish(pose_array)
             self.markers_pub.publish(markers)

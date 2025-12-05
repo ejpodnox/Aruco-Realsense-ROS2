@@ -7,17 +7,20 @@
 import numpy as np
 import cv2
 import tf_transformations
+from typing import Optional
 
 # ROS2 imports
 from rclpy.impl import rcutils_logger
 
 # ROS2 message imports
-from geometry_msgs.msg import Pose
-from geometry_msgs.msg import PoseArray
-from aruco_interfaces.msg import ArucoMarkers
+from geometry_msgs.msg import Pose, PoseArray, Point
+from aruco_interfaces.msg import ArucoMarkers, ArucoMarker
 
 # utils import python code
 from aruco_pose_estimation.utils import aruco_display
+
+# Reuse a single logger to avoid recreating it every frame
+logger = rcutils_logger.RcutilsLogger(name="aruco_node")
 
 
 def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: cv2.aruco.ArucoDetector, marker_size: float,
@@ -42,15 +45,21 @@ def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: 
     # corners, marker_ids, _ = cv2.aruco.detectMarkers(frame, aruco_dict_type, parameters=parameters)
 
     # new code version
-    corners, marker_ids, rejected = aruco_detector.detectMarkers(image=rgb_frame)
+    detection_frame = rgb_frame
+    if rgb_frame.ndim == 3 and rgb_frame.shape[2] == 3:
+        detection_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
+    corners, marker_ids, rejected = aruco_detector.detectMarkers(image=detection_frame)
 
     frame_processed = rgb_frame
-    logger = rcutils_logger.RcutilsLogger(name="aruco_node")
 
     # If markers are detected
     if len(corners) > 0:
 
         logger.debug("Detected {} markers.".format(len(corners)))
+
+        # draw the detected markers once outside the loop to avoid redundant work
+        frame_processed = aruco_display(corners=corners, ids=marker_ids,
+                                        image=frame_processed)
 
         for i, marker_id in enumerate(marker_ids):
             # Estimate pose of each marker and return the values rvec and tvec
@@ -67,27 +76,20 @@ def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: 
                                                                     camera_matrix=matrix_coefficients,
                                                                     distortion=distortion_coefficients)
 
-            # show the detected markers bounding boxes
-            frame_processed = aruco_display(corners=corners, ids=marker_ids,
-                                            image=frame_processed)
-
             # draw frame axes
             frame_processed = cv2.drawFrameAxes(image=frame_processed, cameraMatrix=matrix_coefficients,
                                                 distCoeffs=distortion_coefficients, rvec=rvec, tvec=tvec,
                                                 length=0.05, thickness=3)
 
+            centroid = None
             if (depth_frame is not None):
                 # get the centroid of the pointcloud
                 centroid = depth_to_pointcloud_centroid(depth_image=depth_frame,
                                                         intrinsic_matrix=matrix_coefficients,
                                                         corners=corners[i])
 
-                # log comparison between depthcloud centroid and tvec estimated positions
-                logger.info(f"depthcloud centroid = {centroid}")
-                logger.info(f"tvec = {tvec[0]} {tvec[1]} {tvec[2]}")
-
             # compute pose from the rvec and tvec arrays
-            if (depth_frame is not None):
+            if depth_frame is not None and centroid is not None:
                 # use computed centroid from depthcloud as estimated pose
                 pose = Pose()
                 pose.position.x = float(centroid[0])
@@ -105,10 +107,23 @@ def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: 
             pose.orientation.z = quat[2]
             pose.orientation.w = quat[3]
 
+            # Calculate marker size in image and centroid 2D
+            marker_size_pixels = np.linalg.norm(corners[i][0] - corners[i][2])
+            centroid_2d = np.mean(corners[i][0], axis=0)
+
+            # Create new ArucoMarker with diagnostic information
+            aruco_marker = ArucoMarker()
+            aruco_marker.marker_id = int(marker_id[0])
+            aruco_marker.pose = pose
+            aruco_marker.confidence = 1.0  # Assuming high confidence when detected
+            aruco_marker.size_in_image = float(marker_size_pixels)
+            aruco_marker.centroid_2d = Point(x=float(centroid_2d[0]), y=float(centroid_2d[1]), z=0.0)
+            aruco_marker.is_valid = True
+            aruco_marker.num_corners_detected = 4
+
             # add the pose and marker id to the pose_array and markers messages
             pose_array.poses.append(pose)
-            markers.poses.append(pose)
-            markers.marker_ids.append(marker_id[0])
+            markers.markers.append(aruco_marker)
 
     return frame_processed, pose_array, markers
 
@@ -148,7 +163,7 @@ def my_estimatePoseSingleMarkers(corners, marker_size, camera_matrix, distortion
 
 
 def depth_to_pointcloud_centroid(depth_image: np.array, intrinsic_matrix: np.array,
-                                 corners: np.array) -> np.array:
+                                 corners: np.array) -> Optional[np.array]:
     """
     This function takes a depth image and the corners of a quadrilateral as input,
     and returns the centroid of the corresponding pointcloud.
@@ -159,101 +174,52 @@ def depth_to_pointcloud_centroid(depth_image: np.array, intrinsic_matrix: np.arr
 
     Returns:
         A tuple (x, y, z) representing the centroid of the segmented pointcloud.
+        Returns None if no valid depth pixels are found inside the marker.
     """
 
     # Get image parameters
     height, width = depth_image.shape
-    
 
-    # Check if all corners are within image bounds
     # corners has shape (1, 4, 2)
-    corners_indices = np.array([(int(x), int(y)) for x, y in corners[0]])
+    corners_indices = np.round(corners[0]).astype(np.int32)
 
-    for x, y in corners_indices:
-        if x < 0 or x >= width or y < 0 or y >= height:
-            raise ValueError("One or more corners are outside the image bounds.")
+    if (
+        np.any(corners_indices[:, 0] < 0)
+        or np.any(corners_indices[:, 0] >= width)
+        or np.any(corners_indices[:, 1] < 0)
+        or np.any(corners_indices[:, 1] >= height)
+    ):
+        raise ValueError("One or more corners are outside the image bounds.")
 
     # bounding box of the polygon
-    x_min = int(min(corners_indices[:, 0]))
-    x_max = int(max(corners_indices[:, 0]))
-    y_min = int(min(corners_indices[:, 1]))
-    y_max = int(max(corners_indices[:, 1]))
+    x_min = int(np.min(corners_indices[:, 0]))
+    x_max = int(np.max(corners_indices[:, 0]))
+    y_min = int(np.min(corners_indices[:, 1]))
+    y_max = int(np.max(corners_indices[:, 1]))
 
-    # create array of pixels inside the polygon defined by the corners
-    # search for pixels inside the squared bounding box of the polygon
-    points = []
-    for x in range(x_min, x_max):
-        for y in range(y_min, y_max):
-            if is_pixel_in_polygon(pixel=(x, y), corners=corners_indices):
-                # add point to the list of points
-                points.append([x, y, depth_image[y, x]])
+    # Build a binary mask for the polygon inside its bounding box
+    mask = np.zeros((y_max - y_min + 1, x_max - x_min + 1), dtype=np.uint8)
+    shifted_corners = corners_indices.copy()
+    shifted_corners[:, 0] -= x_min
+    shifted_corners[:, 1] -= y_min
+    cv2.fillConvexPoly(mask, shifted_corners, 1)
 
-    # Convert points to numpy array
-    points = np.array(points, dtype=np.uint16)
-   
-    # convert to open3d image
-    #depth_segmented = geometry.Image(points)
-    # create pinhole camera model
-    #pinhole_matrix = camera.PinholeCameraIntrinsic(width=width, height=height, 
-    #                                               intrinsic_matrix=intrinsic_matrix)
-    # Convert points to Open3D pointcloud
-    #pointcloud = geometry.PointCloud.create_from_depth_image(depth=depth_segmented, intrinsic=pinhole_matrix,
-    #                                                         depth_scale=1000.0)
+    depth_roi = depth_image[y_min: y_max + 1, x_min: x_max + 1]
 
-    # apply formulas to pointcloud, where 
-    # fx = intrinsic_matrix[0, 0], fy = intrinsic_matrix[1, 1]
-    # cx = intrinsic_matrix[0, 2], cy = intrinsic_matrix[1, 2], 
-    # u = x, v = y, d = depth_image[y, x], depth_scale = 1000.0,
-    # z = d / depth_scale
-    # x = (u - cx) * z / fx
-    # y = (v - cy) * z / fy
+    valid_mask = (mask == 1) & (depth_roi > 0)
+    if not np.any(valid_mask):
+        return None
 
-    # create pointcloud
-    pointcloud = []
-    for x, y, d in points:
-        z = d / 1000.0
-        x = (x - intrinsic_matrix[0, 2]) * z / intrinsic_matrix[0, 0]
-        y = (y - intrinsic_matrix[1, 2]) * z / intrinsic_matrix[1, 1]
-        pointcloud.append([x, y, z])
+    ys, xs = np.nonzero(valid_mask)
+    depths = depth_roi[valid_mask].astype(np.float32) * 0.001  # convert mm to meters
 
-    # Calculate centroid from pointcloud
-    centroid = np.mean(np.array(pointcloud, dtype=np.uint16), axis=0)
+    # Map ROI coordinates back to image coordinates
+    u = xs.astype(np.float32) + x_min
+    v = ys.astype(np.float32) + y_min
+
+    x = (u - intrinsic_matrix[0, 2]) * depths / intrinsic_matrix[0, 0]
+    y = (v - intrinsic_matrix[1, 2]) * depths / intrinsic_matrix[1, 1]
+
+    centroid = np.array([np.mean(x), np.mean(y), np.mean(depths)], dtype=np.float32)
 
     return centroid
-
-
-def is_pixel_in_polygon(pixel: tuple, corners: np.array) -> bool:
-    """
-    This function takes a pixel and a list of corners as input, and returns whether the pixel is inside the polygon
-    defined by the corners. This function uses the ray casting algorithm to determine if the pixel is inside the polygon.
-    This algorithm works by casting a ray from the pixel in the positive x-direction, and counting the number of times
-    the ray intersects with the edges of the polygon. If the number of intersections is odd, the pixel is inside the
-    polygon, otherwise it is outside. This algorithm works for both convex and concave polygons.
-
-    Args:
-        pixel: A tuple (x, y) representing the pixel coordinates.
-        corners: A list of 4 tuples in a numpy array, each representing the (x, y) coordinates of a corner.
-
-    Returns:
-        A boolean indicating whether the pixel is inside the polygon.
-    """
-
-    # Initialize counter for number of intersections
-    num_intersections = 0
-
-    # Iterate over each edge of the polygon
-    for i in range(len(corners)):
-        x1, y1 = corners[i]
-        x2, y2 = corners[(i + 1) % len(corners)]
-
-        # Check if the pixel is on the same y-level as the edge
-        if (y1 <= pixel[1] < y2) or (y2 <= pixel[1] < y1):
-            # Calculate the x-coordinate of the intersection point
-            x_intersection = (x2 - x1) * (pixel[1] - y1) / (y2 - y1) + x1
-
-            # Check if the intersection point is to the right of the pixel
-            if x_intersection > pixel[0]:
-                num_intersections += 1
-
-    # Return whether the number of intersections is odd
-    return num_intersections % 2 == 1
