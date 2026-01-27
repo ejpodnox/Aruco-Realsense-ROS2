@@ -1,0 +1,9 @@
+source;share/aruco_z_rotation/hook/pythonpath.ps1
+source;share/aruco_z_rotation/hook/pythonpath.dsv
+source;share/aruco_z_rotation/hook/pythonpath.sh
+source;share/aruco_z_rotation/hook/ament_prefix_path.ps1
+source;share/aruco_z_rotation/hook/ament_prefix_path.dsv
+source;share/aruco_z_rotation/hook/ament_prefix_path.sh
+source;../../build/aruco_z_rotation/share/aruco_z_rotation/hook/pythonpath_develop.ps1
+source;../../build/aruco_z_rotation/share/aruco_z_rotation/hook/pythonpath_develop.dsv
+source;../../build/aruco_z_rotation/share/aruco_z_rotation/hook/pythonpath_develop.sh

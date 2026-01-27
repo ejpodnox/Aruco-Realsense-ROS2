@@ -1,0 +1,3 @@
+[console_scripts]
+z_rotation_node = aruco_z_rotation.z_rotation_node:main
+

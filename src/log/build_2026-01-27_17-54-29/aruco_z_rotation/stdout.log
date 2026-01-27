@@ -1,0 +1,24 @@
+running develop
+running egg_info
+creating aruco_z_rotation.egg-info
+writing aruco_z_rotation.egg-info/PKG-INFO
+writing dependency_links to aruco_z_rotation.egg-info/dependency_links.txt
+writing entry points to aruco_z_rotation.egg-info/entry_points.txt
+writing requirements to aruco_z_rotation.egg-info/requires.txt
+writing top-level names to aruco_z_rotation.egg-info/top_level.txt
+writing manifest file 'aruco_z_rotation.egg-info/SOURCES.txt'
+reading manifest file 'aruco_z_rotation.egg-info/SOURCES.txt'
+writing manifest file 'aruco_z_rotation.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/lib/python3.10/site-packages/aruco-z-rotation.egg-link (link to .)
+Installing z_rotation_node script to /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/lib/aruco_z_rotation
+
+Installed /home/billy-linux-think/AAAA/ArucoRotation/src/build/aruco_z_rotation
+running symlink_data
+creating /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/ament_index
+creating /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/ament_index/resource_index
+creating /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/ament_index/resource_index/packages
+symbolically linking /home/billy-linux-think/AAAA/ArucoRotation/src/build/aruco_z_rotation/resource/aruco_z_rotation -> /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/ament_index/resource_index/packages
+symbolically linking /home/billy-linux-think/AAAA/ArucoRotation/src/build/aruco_z_rotation/package.xml -> /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/aruco_z_rotation
+creating /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/aruco_z_rotation/launch
+symbolically linking /home/billy-linux-think/AAAA/ArucoRotation/src/build/aruco_z_rotation/launch/aruco_z_rotation.launch.py -> /home/billy-linux-think/AAAA/ArucoRotation/src/install/aruco_z_rotation/share/aruco_z_rotation/launch
