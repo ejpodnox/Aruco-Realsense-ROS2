@@ -63,6 +63,18 @@ class ArucoZRotationNode(Node):
                 self.aruco_dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_100)
 
             self.aruco_parameters = cv2.aruco.DetectorParameters()
+            
+            # --- Robustness Tuning ---
+            # Improves pose accuracy, especially when tilted
+            self.aruco_parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX 
+            # Allow detecting smaller markers (useful when marker is tilted away)
+            self.aruco_parameters.minMarkerPerimeterRate = 0.02 
+            # Tune adaptive thresholding for better detection in varying light
+            self.aruco_parameters.adaptiveThreshWinSizeMin = 3
+            self.aruco_parameters.adaptiveThreshWinSizeMax = 30
+            self.aruco_parameters.adaptiveThreshWinSizeStep = 10
+            # -------------------------
+
             self.detector = cv2.aruco.ArucoDetector(self.aruco_dictionary, self.aruco_parameters)
             self.use_new_api = True
         except AttributeError:
@@ -70,6 +82,15 @@ class ArucoZRotationNode(Node):
             target_dict_id = cv2.aruco.DICT_ARUCO_ORIGINAL if dictionary_id_str == 'DICT_ORIGINAL' else getattr(cv2.aruco, dictionary_id_str)
             self.aruco_dictionary = cv2.aruco.Dictionary_get(target_dict_id)
             self.aruco_parameters = cv2.aruco.DetectorParameters_create()
+            
+            # --- Robustness Tuning (Old API) ---
+            self.aruco_parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX 
+            self.aruco_parameters.minMarkerPerimeterRate = 0.02
+            self.aruco_parameters.adaptiveThreshWinSizeMin = 3
+            self.aruco_parameters.adaptiveThreshWinSizeMax = 30
+            self.aruco_parameters.adaptiveThreshWinSizeStep = 10
+            # -----------------------------------
+
             self.use_new_api = False
 
         # Camera Intrinsics
