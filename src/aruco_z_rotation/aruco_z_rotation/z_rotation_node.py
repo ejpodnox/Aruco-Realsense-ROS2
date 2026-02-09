@@ -8,7 +8,7 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import tf2_ros
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PointStamped
 from std_msgs.msg import Float32
 import math
 
@@ -37,6 +37,12 @@ class ArucoZRotationNode(Node):
         self.accumulated_yaw = 0.0
         self.last_yaw = None
         self.wrap_around_threshold = 300.0 # deg, threshold to detect 359->0 transition
+
+        # Video recording
+        self.is_recording = False
+        self.video_writer = None
+        self.video_filename = None
+        self.frame_size = None
 
         # CSV initialization
         if self.csv_output:
@@ -103,7 +109,8 @@ class ArucoZRotationNode(Node):
 
         # Publishers
         self.rotation_pub = self.create_publisher(Float32, 'aruco_z_rotation', 10)
-        
+        self.rotation_stamped_pub = self.create_publisher(PointStamped, 'aruco_z_rotation_stamped', 10)
+
         # Subscribers
         self.create_subscription(CameraInfo, self.camera_info_topic, self.camera_info_callback, 10)
         self.create_subscription(Image, self.camera_topic, self.image_callback, qos_profile_sensor_data)
@@ -178,7 +185,19 @@ class ArucoZRotationNode(Node):
                     self.last_yaw = yaw_deg
 
                     # Publish Rotation
-                    self.rotation_pub.publish(Float32(data=yaw_deg))
+                    # self.rotation_pub.publish(Float32(data=yaw_deg))
+                    # Publish (unstamped, for backward compatibility)
+                    self.rotation_pub.publish(Float32(data=float(yaw_deg)))
+
+                    # Publish stamped (for synchronization)
+                    m = PointStamped()
+                    m.header.stamp = msg.header.stamp  # best: use the image timestamp
+                    m.header.frame_id = msg.header.frame_id
+                    m.point.x = 0.0
+                    m.point.y = 0.0
+                    m.point.z = float(self.accumulated_yaw)
+                    self.rotation_stamped_pub.publish(m)
+
                     self.get_logger().info(f"Marker {marker_id} Yaw: {yaw_deg:.2f}, Total: {self.accumulated_yaw:.2f} deg")
 
                     # Broadcast TF
@@ -291,8 +310,52 @@ class ArucoZRotationNode(Node):
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
         if self.show_window:
+            # Show recording indicator if recording
+            if self.is_recording:
+                cv2.circle(cv_image, (cv_image.shape[1] - 30, 30), 15, (0, 0, 255), -1)  # Red dot
+                cv2.putText(cv_image, "REC", (cv_image.shape[1] - 80, 38),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+            
+            # Show instructions
+            cv2.putText(cv_image, "R: Record | T: Reset", (10, cv_image.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            
             cv2.imshow("ArUco Detection", cv_image)
-            cv2.waitKey(1)
+            
+            # Handle key presses
+            key = cv2.waitKey(1) & 0xFF
+            
+            # 'R' or 'r' to toggle recording
+            if key == ord('r') or key == ord('R'):
+                if not self.is_recording:
+                    # Start recording
+                    self.frame_size = (cv_image.shape[1], cv_image.shape[0])
+                    timestamp_str = str(int(self.get_clock().now().nanoseconds / 1e6))
+                    self.video_filename = f"aruco_recording_{timestamp_str}.avi"
+                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    self.video_writer = cv2.VideoWriter(self.video_filename, fourcc, 30.0, self.frame_size)
+                    self.is_recording = True
+                    # Also reset accumulated yaw when starting recording
+                    self.accumulated_yaw = 0.0
+                    self.last_yaw = None
+                    self.get_logger().info(f"Started recording: {self.video_filename} (Rotation RESET)")
+                else:
+                    # Stop recording
+                    if self.video_writer is not None:
+                        self.video_writer.release()
+                        self.video_writer = None
+                    self.is_recording = False
+                    self.get_logger().info(f"Stopped recording: {self.video_filename}")
+            
+            # 'T' or 't' to reset accumulated rotation only
+            if key == ord('t') or key == ord('T'):
+                self.accumulated_yaw = 0.0
+                self.last_yaw = None
+                self.get_logger().info("Accumulated rotation RESET by user.")
+            
+            # Write frame to video if recording
+            if self.is_recording and self.video_writer is not None:
+                self.video_writer.write(cv_image)
 
     def detect_rotation_matrix_to_quaternion(self, m):
         # Implementation of rotation matrix to quaternion
@@ -325,6 +388,10 @@ class ArucoZRotationNode(Node):
         return [qx, qy, qz, qw]
 
     def destroy_node(self):
+        # Stop video recording if active
+        if self.is_recording and self.video_writer is not None:
+            self.video_writer.release()
+            self.get_logger().info(f"Recording saved: {self.video_filename}")
         if hasattr(self, 'csv_file') and self.csv_file:
             self.csv_file.close()
         cv2.destroyAllWindows()
