@@ -1,0 +1,5 @@
+opencv-python
+opencv-contrib-python
+transforms3d>=0.4.1
+empy==3.3.4
+numpy>=1.21.0,<2.0.0

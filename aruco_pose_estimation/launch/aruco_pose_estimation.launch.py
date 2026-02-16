@@ -1,5 +1,5 @@
 # ROS2 imports
-from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, TextSubstitution
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, TextSubstitution, AndSubstitution, NotSubstitution
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch import LaunchDescription
@@ -18,7 +18,7 @@ def generate_launch_description():
     aruco_params_file = os.path.join(
         get_package_share_directory('aruco_pose_estimation'),
         'config',
-        'aruco_parameters.yaml'
+        'aruco_parameters_kinova.yaml'
     )
 
     with open(aruco_params_file, 'r') as file:
@@ -49,6 +49,13 @@ def generate_launch_description():
         name='use_depth_input',
         default_value=str(config['use_depth_input']),
         description='Use depth input for pose estimation',
+        choices=['true', 'false', 'True', 'False']
+    )
+
+    launch_camera_arg = DeclareLaunchArgument(
+        name='launch_camera',
+        default_value='false',
+        description='Launch RealSense camera automatically',
         choices=['true', 'false', 'True', 'False']
     )
 
@@ -122,16 +129,17 @@ def generate_launch_description():
             "enable_color": "true",
             "enable_depth": "true",
         }.items(),
-        condition=IfCondition(LaunchConfiguration('use_depth_input'))
+        condition=IfCondition(LaunchConfiguration('launch_camera'))
     )
 
     camera_feed_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(cam_feed_launch_file),
         launch_arguments={
-            "pointcloud.enable": "true",
+            "pointcloud.enable": "false",
             "enable_color": "true",
+            "rgb_camera.color_profile": "640x480x15",  # Lower resolution and framerate
         }.items(),
-        condition=UnlessCondition(LaunchConfiguration('use_depth_input'))
+        condition=IfCondition(LaunchConfiguration('launch_camera'))
     )
 
     rviz_file = PathJoinSubstitution([
@@ -152,6 +160,7 @@ def generate_launch_description():
         aruco_dictionary_id_arg,
         image_topic_arg,
         use_depth_input_arg,
+        launch_camera_arg,
         depth_image_topic_arg,
         camera_info_topic_arg,
         camera_frame_arg,

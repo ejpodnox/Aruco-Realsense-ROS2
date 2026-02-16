@@ -1,14 +1,5 @@
 # Aruco Pose Estimation with ROS2, using RGB and Depth camera images from Realsense D435
 
-Code developed by: __Simone Giampà__
-
-Project and experimentation conducted at __Politecnico di Milano, Artificial Intelligence and Robotics Laboratory, 2024__
-
-_Project part of my Master's Thesis project at Politecnico di Milano, Italy._
-
-ROS2 wrapper for Aruco marker detection and pose estimation, using OpenCV library. The marker detection and pose estimation is
-done using RGB and optionally Depth images. This package works for ROS2 Humble and Iron.
-
 This package allows to use cameras to detect Aruco markers and estimate their poses. It allows to use any camera with ROS2 drivers.
 The code is a ROS2 publisher-subscriber working with RGB camera images for marker detection and RGB or depth images for pose estimation. 
 It also allows using multiple aruco markers at the same time, and each of them will be published as a separate pose. 
@@ -20,15 +11,56 @@ different cameras, provided a proper calibration of the camera parameters.
 
 ## Installation
 
+### Install RealSense ROS2 Wrapper (Required for RealSense cameras)
+
+If using Intel RealSense cameras, install the RealSense ROS2 packages:
+
+```bash
+# For ROS2 Humble:
+$ sudo apt install ros-humble-librealsense2*
+$ sudo apt install ros-humble-realsense2-*
+
+# For ROS2 Iron:
+$ sudo apt install ros-iron-librealsense2*
+$ sudo apt install ros-iron-realsense2-*
+```
+
+### Install Python Dependencies
+
 This package depends on a recent version of OpenCV python library and transforms libraries:
 
 ```bash
-$ pip3 install opencv-python opencv-contrib-python transforms3d
+$ pip3 install -r requirements.txt
 
+$ sudo apt install ros-humble-tf-transformations
+# OR for ROS2 Iron:
 $ sudo apt install ros-iron-tf-transformations
 ```
 
-Build the package from source with `colcon build --symlink-install` in the workspace root.
+**Note for Conda Users:** If using conda environments with ROS2 Humble, you need to install additional dependencies:
+```bash
+$ pip uninstall em  # Remove conflicting 'em' package if present
+$ pip install catkin_pkg lark empy==3.3.4
+$ pip install "numpy<2.0.0"  # ROS2 Humble's cv_bridge requires NumPy 1.x
+```
+
+Build the package from source with `colcon build --symlink-install` in the workspace root:
+
+```bash
+$ cd /path/to/your/ros2_workspace
+$ colcon build --symlink-install
+$ source install/setup.bash
+```
+
+**Important:** You must source the workspace in every new terminal before using the package:
+```bash
+$ source install/setup.bash
+```
+
+Or add it to your `.bashrc` for automatic sourcing:
+```bash
+$ echo "source ~/path/to/your/ros2_workspace/install/setup.bash" >> ~/.bashrc
+```
 
 ## Aruco Pose Detection and Estimation ROS2 nodes description
 
@@ -67,17 +99,86 @@ __Parameters__ for the node can be set in the `config/aruco_parameters.yaml` fil
 Launch the aruco pose estimation node with this command. The parameters will be loaded from _aruco\_parameters.yaml_,
 but can also be changed directly in the launch file with command line arguments.
 
+**Basic launch (camera must be running separately):**
+
 ```bash
 ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py
 ```
 
-Change the parameters directly in the launch file:
+**Launch with automatic camera start:**
 
 ```bash
-ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py marker_size:=0.1 aruco_dictionary_id:=DICT_5X5_250 camera_frame:=camera_link
+ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py launch_camera:=true
 ```
 
-### Future updates
+**If running camera separately (recommended for better performance):**
+
+```bash
+# Terminal 1 - Start camera
+ros2 launch realsense2_camera rs_launch.py rgb_camera.color_profile:=640x480x15
+
+# Terminal 2 - Start ArUco detection
+ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py
+```
+
+**Change parameters directly in the launch file:**
+
+```bash
+ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py marker_size:=0.05 aruco_dictionary_id:=DICT_5X5_250 launch_camera:=true
+```
+
+## Troubleshooting
+
+### No markers detected or nothing showing up
+
+1. **Check if topics are publishing:**
+   ```bash
+   ros2 topic list
+   ```
+   You should see `/aruco/markers`, `/aruco/poses`, `/aruco/image`, and camera topics.
+
+2. **Check if markers are being detected:**
+   ```bash
+   ros2 topic echo /aruco/markers
+   ```
+   If empty, no markers are detected.
+
+3. **View the camera output with detected markers:**
+   ```bash
+   ros2 run rqt_image_view rqt_image_view
+   ```
+   Select `/aruco/image` to see the annotated camera feed with detected markers.
+
+4. **View raw camera image:**
+   ```bash
+   ros2 run rqt_image_view rqt_image_view
+   ```
+   Select `/camera/color/image_raw` to verify camera is working.
+
+5. **Verify ArUco marker configuration:**
+   - Ensure your printed markers match the dictionary in the config file (default: `DICT_4X4_50`)
+   - Verify the `marker_size` parameter matches your physical marker size in meters (default: 0.2m = 20cm)
+   - Update [aruco_parameters.yaml](aruco_pose_estimation/config/aruco_parameters.yaml) if needed
+
+6. **Generate matching ArUco markers:**
+   - Use [this online generator](http://chev.me/arucogen/) or OpenCV
+   - Select the correct dictionary (e.g., 4x4_50)
+   - Print markers at the size specified in your config
+
+### Camera not starting
+
+If the RealSense camera doesn't start automatically, launch it manually:
+
+```bash
+ros2 launch realsense2_camera rs_launch.py enable_rgbd:=true enable_sync:=true align_depth.enable:=true enable_color:=true enable_depth:=true pointcloud.enable:=true
+```
+
+Check if camera is detected:
+```bash
+rs-enumerate-devices
+```
+
+## Future updates
 
 It will soon be possible to load the camera calibrated parameters from a yaml configuration file, so that
 the camera intrinsic and distortion parameters can be loaded without relying on the camera_info topic or service.

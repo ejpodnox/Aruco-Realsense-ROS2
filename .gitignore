@@ -1,1 +1,6 @@
 /.vscode
+
+# ROS2 Build Artifacts (should never be in src/)
+build/
+install/
+log/
