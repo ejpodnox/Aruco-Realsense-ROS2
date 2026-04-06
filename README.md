@@ -158,7 +158,7 @@ aruco_board:
 Each `xyz` and `rpy` entry defines the pose of a marker center in the rigid board frame.
 The node derives each marker's 3D corners from this pose and the existing global `marker_size`.
 
-### Launch board fusion
+### Launch board fusion  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 ```bash
 ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py \
