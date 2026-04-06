@@ -158,7 +158,7 @@ aruco_board:
 Each `xyz` and `rpy` entry defines the pose of a marker center in the rigid board frame.
 The node derives each marker's 3D corners from this pose and the existing global `marker_size`.
 
-### Launch board fusion  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+### Launch board fusion
 
 ```bash
 ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py \
@@ -172,10 +172,40 @@ This publishes:
 * the current per-marker outputs on `/aruco/markers` and `/aruco/poses`
 * the fused rigid-board pose on `/aruco/board_pose`
 
+### Try depth-assisted board fusion
+
+1. Make sure your board layout file matches the real rigid marker arrangement:
+   - marker IDs must match what the camera sees
+   - `xyz` must match real distances between marker centers
+2. Launch with both board fusion and depth input enabled:
+
+```bash
+ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py \
+  launch_camera:=true \
+  enable_board_fusion:=true \
+  use_depth_input:=true \
+  board_config_file:=config/aruco_board_layout.yaml
+```
+
+3. Verify fused output is publishing:
+
+```bash
+ros2 topic echo /aruco/board_pose
+```
+
+4. Open `/aruco/image` in `rqt_image_view` and check overlay lines:
+   - `Board mode: rgb_pnp`
+   - `Board mode: depth_translation_refined`
+   - `Board mode: depth_3d3d`
+
 ### Current limitation
 
-Board fusion is RGB-based in this first version.
-If `use_depth_input:=true`, the existing per-marker depth behavior is preserved, but the fused board pose is still estimated from RGB image observations and camera intrinsics.
+Board fusion always starts from RGB marker observations.
+If `use_depth_input:=true`, depth is now used to refine the fused board pose:
+- with 1 or 2 valid depth markers, translation is refined while rotation remains RGB-based
+- with 3 or more valid depth markers, a full 3D-3D rigid pose is estimated from depth centroids
+
+If depth is missing/noisy for the configured board markers, fused pose estimation falls back to RGB-only PnP.
 
 ## Troubleshooting
 
@@ -198,6 +228,11 @@ If `use_depth_input:=true`, the existing per-marker depth behavior is preserved,
    ros2 topic echo /aruco/board_pose
    ```
    If empty, fewer than `board_min_markers` configured board markers are visible, or the board config does not match the visible marker IDs.
+
+   In `/aruco/image`, check `Board mode`:
+   - `rgb_pnp`: RGB-only fused pose
+   - `depth_translation_refined`: depth refined translation (1-2 markers with valid depth)
+   - `depth_3d3d`: full depth 3D-3D rigid fusion (3+ markers with valid depth)
 
 4. **View the camera output with detected markers:**
    ```bash

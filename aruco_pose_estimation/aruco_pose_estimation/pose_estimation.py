@@ -143,6 +143,7 @@ def pose_estimation(rgb_frame: np.ndarray, depth_frame: Optional[np.ndarray], ar
             board_config=board_config,
             camera_matrix=matrix_coefficients,
             distortion_coefficients=distortion_coefficients,
+            depth_frame=depth_frame,
             min_markers=board_min_markers,
             refine=board_pose_refine,
         )
@@ -205,24 +206,29 @@ def depth_to_pointcloud_centroid(depth_image: np.array, intrinsic_matrix: np.arr
 
     # corners has shape (1, 4, 2)
     corners_indices = np.round(corners[0]).astype(np.int32)
+    if corners_indices.shape != (4, 2):
+        return None
 
-    if (
-        np.any(corners_indices[:, 0] < 0)
-        or np.any(corners_indices[:, 0] >= width)
-        or np.any(corners_indices[:, 1] < 0)
-        or np.any(corners_indices[:, 1] >= height)
-    ):
-        raise ValueError("One or more corners are outside the image bounds.")
+    # Markers touching the image border are expected in real streams.
+    # Clip them to the valid image area instead of throwing.
+    corners_clipped = corners_indices.copy()
+    corners_clipped[:, 0] = np.clip(corners_clipped[:, 0], 0, width - 1)
+    corners_clipped[:, 1] = np.clip(corners_clipped[:, 1], 0, height - 1)
+
+    if cv2.contourArea(corners_clipped.astype(np.float32)) < 1.0:
+        return None
 
     # bounding box of the polygon
-    x_min = int(np.min(corners_indices[:, 0]))
-    x_max = int(np.max(corners_indices[:, 0]))
-    y_min = int(np.min(corners_indices[:, 1]))
-    y_max = int(np.max(corners_indices[:, 1]))
+    x_min = int(np.min(corners_clipped[:, 0]))
+    x_max = int(np.max(corners_clipped[:, 0]))
+    y_min = int(np.min(corners_clipped[:, 1]))
+    y_max = int(np.max(corners_clipped[:, 1]))
+    if x_max <= x_min or y_max <= y_min:
+        return None
 
     # Build a binary mask for the polygon inside its bounding box
     mask = np.zeros((y_max - y_min + 1, x_max - x_min + 1), dtype=np.uint8)
-    shifted_corners = corners_indices.copy()
+    shifted_corners = corners_clipped.copy()
     shifted_corners[:, 0] -= x_min
     shifted_corners[:, 1] -= y_min
     cv2.fillConvexPoly(mask, shifted_corners, 1)
@@ -234,7 +240,11 @@ def depth_to_pointcloud_centroid(depth_image: np.array, intrinsic_matrix: np.arr
         return None
 
     ys, xs = np.nonzero(valid_mask)
-    depths = depth_roi[valid_mask].astype(np.float32) * 0.001  # convert mm to meters
+    raw_depths = depth_roi[valid_mask].astype(np.float32)
+    if np.issubdtype(depth_image.dtype, np.integer):
+        depths = raw_depths * 0.001  # convert mm to meters
+    else:
+        depths = raw_depths
 
     # Map ROI coordinates back to image coordinates
     u = xs.astype(np.float32) + x_min
@@ -266,6 +276,9 @@ def draw_board_fusion_status(
     if board_status.pose_estimate is None:
         lines.append("Board pose unavailable")
         return draw_text_block(image, lines)
+
+    lines.append("Board mode: {}".format(board_status.pose_estimate.estimation_mode))
+    lines.append("Depth markers used: {}".format(board_status.pose_estimate.depth_markers_used))
 
     image = cv2.drawFrameAxes(
         image=image,

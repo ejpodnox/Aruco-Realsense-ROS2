@@ -4,6 +4,7 @@ import pytest
 
 from aruco_pose_estimation.board_fusion import (
     estimate_fused_board_pose,
+    estimate_rigid_transform,
     get_local_marker_corners,
     load_board_configuration,
 )
@@ -109,6 +110,8 @@ aruco_board:
     np.testing.assert_allclose(estimated_rotation, true_rotation, atol=1e-4)
     assert board_status.pose_estimate.reprojection_error is not None
     assert board_status.pose_estimate.reprojection_error < 1e-4
+    assert board_status.pose_estimate.estimation_mode == "rgb_pnp"
+    assert board_status.pose_estimate.depth_markers_used == 0
 
 
 def test_estimate_fused_board_pose_requires_minimum_visible_markers(tmp_path):
@@ -157,3 +160,91 @@ aruco_board:
 
     assert board_status.visible_marker_ids == [0]
     assert board_status.pose_estimate is None
+
+
+def test_estimate_rigid_transform_recovers_known_transform():
+    source_points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.08, 0.0, 0.0],
+            [0.0, 0.05, 0.0],
+            [0.02, 0.01, 0.04],
+        ],
+        dtype=np.float32,
+    )
+
+    true_rvec = np.array([[0.15], [-0.05], [0.08]], dtype=np.float32)
+    true_rotation, _ = cv2.Rodrigues(true_rvec)
+    true_translation = np.array([0.03, -0.01, 0.72], dtype=np.float32)
+    target_points = (true_rotation @ source_points.T).T + true_translation
+
+    estimated_rotation, estimated_translation = estimate_rigid_transform(
+        source_points=source_points,
+        target_points=target_points,
+    )
+
+    np.testing.assert_allclose(estimated_rotation, true_rotation, atol=1e-6)
+    np.testing.assert_allclose(estimated_translation, true_translation, atol=1e-6)
+
+
+def test_estimate_fused_board_pose_uses_depth_translation_refinement(tmp_path):
+    config_path = tmp_path / "depth_board.yaml"
+    config_path.write_text(
+        """
+aruco_board:
+  frame_name: board
+  markers:
+    - id: 0
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
+    - id: 1
+      xyz: [0.08, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    board_config = load_board_configuration(str(config_path), marker_size=0.05)
+    camera_matrix = np.array(
+        [[610.0, 0.0, 320.0], [0.0, 610.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    distortion = np.zeros((5,), dtype=np.float32)
+    true_rvec = np.array([[0.0], [0.0], [0.0]], dtype=np.float32)
+    true_tvec = np.array([[0.01], [-0.02], [0.8]], dtype=np.float32)
+
+    corners = []
+    marker_ids = []
+    depth_image = np.zeros((480, 640), dtype=np.uint16)
+    for marker_id in sorted(board_config.markers):
+        projected_points, _ = cv2.projectPoints(
+            board_config.markers[marker_id].object_points,
+            true_rvec,
+            true_tvec,
+            camera_matrix,
+            distortion,
+        )
+        marker_corners = projected_points.reshape(1, 4, 2).astype(np.float32)
+        corners.append(marker_corners)
+        marker_ids.append([marker_id])
+        cv2.fillConvexPoly(
+            depth_image,
+            np.round(marker_corners[0]).astype(np.int32),
+            int(round(float(true_tvec[2, 0] * 1000.0))),
+        )
+
+    board_status = estimate_fused_board_pose(
+        corners=corners,
+        marker_ids=np.array(marker_ids, dtype=np.int32),
+        board_config=board_config,
+        camera_matrix=camera_matrix,
+        distortion_coefficients=distortion,
+        depth_frame=depth_image,
+        min_markers=2,
+        refine=True,
+    )
+
+    assert board_status.pose_estimate is not None
+    assert board_status.pose_estimate.estimation_mode == "depth_translation_refined"
+    assert board_status.pose_estimate.depth_markers_used == 2
+    np.testing.assert_allclose(board_status.pose_estimate.translation[2], true_tvec[2, 0], atol=0.03)

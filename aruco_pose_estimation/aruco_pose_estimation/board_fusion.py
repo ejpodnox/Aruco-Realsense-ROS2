@@ -29,6 +29,8 @@ class BoardPoseEstimate:
     rotation_vector: np.ndarray
     quaternion: np.ndarray
     reprojection_error: Optional[float]
+    estimation_mode: str
+    depth_markers_used: int
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,7 @@ def estimate_fused_board_pose(
     board_config: BoardConfiguration,
     camera_matrix: np.ndarray,
     distortion_coefficients: np.ndarray,
+    depth_frame: Optional[np.ndarray] = None,
     min_markers: int = 2,
     refine: bool = True,
 ) -> BoardFusionStatus:
@@ -188,6 +191,36 @@ def estimate_fused_board_pose(
             tvec=tvec,
         )
 
+    depth_markers_used = 0
+    estimation_mode = "rgb_pnp"
+    if depth_frame is not None:
+        board_points, camera_points, depth_marker_ids = collect_board_depth_observations(
+            corners=corners,
+            marker_ids=marker_ids,
+            board_config=board_config,
+            depth_frame=depth_frame,
+            camera_matrix=camera_matrix,
+        )
+
+        depth_markers_used = len(depth_marker_ids)
+        if depth_markers_used >= 3:
+            rotation_matrix, depth_translation = estimate_rigid_transform(
+                source_points=board_points,
+                target_points=camera_points,
+            )
+            rvec, _ = cv2.Rodrigues(rotation_matrix)
+            rvec = rvec.reshape(3, 1)
+            tvec = depth_translation.reshape(3, 1)
+            estimation_mode = "depth_3d3d"
+        elif depth_markers_used >= 1:
+            rotation_matrix, _ = cv2.Rodrigues(rvec)
+            translation = np.mean(
+                camera_points - (rotation_matrix @ board_points.T).T,
+                axis=0,
+            )
+            tvec = translation.reshape(3, 1)
+            estimation_mode = "depth_translation_refined"
+
     quaternion = rotation_vector_to_quaternion(rvec)
     reprojection_error = compute_reprojection_error(
         object_points,
@@ -207,8 +240,79 @@ def estimate_fused_board_pose(
             rotation_vector=rvec.reshape(3, 1),
             quaternion=quaternion,
             reprojection_error=reprojection_error,
+            estimation_mode=estimation_mode,
+            depth_markers_used=depth_markers_used,
         ),
     )
+
+
+def collect_board_depth_observations(
+    corners: list[np.ndarray],
+    marker_ids: Optional[np.ndarray],
+    board_config: BoardConfiguration,
+    depth_frame: np.ndarray,
+    camera_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    if marker_ids is None or len(corners) == 0:
+        return _empty_depth_observations()
+
+    board_points: list[np.ndarray] = []
+    camera_points: list[np.ndarray] = []
+    depth_marker_ids: list[int] = []
+
+    for marker_corners, marker_id in zip(corners, np.asarray(marker_ids).reshape(-1)):
+        marker_id = int(marker_id)
+        marker_definition = board_config.markers.get(marker_id)
+        if marker_definition is None:
+            continue
+
+        centroid = depth_to_pointcloud_centroid(
+            depth_image=depth_frame,
+            intrinsic_matrix=camera_matrix,
+            corners=np.asarray(marker_corners, dtype=np.float32).reshape(1, 4, 2),
+        )
+        if centroid is None:
+            continue
+
+        board_points.append(marker_definition.xyz.astype(np.float32))
+        camera_points.append(centroid.astype(np.float32))
+        depth_marker_ids.append(marker_id)
+
+    if not board_points:
+        return _empty_depth_observations()
+
+    return (
+        np.asarray(board_points, dtype=np.float32),
+        np.asarray(camera_points, dtype=np.float32),
+        depth_marker_ids,
+    )
+
+
+def estimate_rigid_transform(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if source_points.shape != target_points.shape or source_points.ndim != 2 or source_points.shape[1] != 3:
+        raise ValueError("Rigid transform requires source and target points with shape (N, 3).")
+    if source_points.shape[0] < 3:
+        raise ValueError("Rigid transform requires at least 3 point correspondences.")
+
+    source_centroid = np.mean(source_points, axis=0)
+    target_centroid = np.mean(target_points, axis=0)
+
+    source_centered = source_points - source_centroid
+    target_centered = target_points - target_centroid
+
+    covariance = source_centered.T @ target_centered
+    u, _, vt = np.linalg.svd(covariance)
+    rotation = vt.T @ u.T
+
+    if np.linalg.det(rotation) < 0:
+        vt[-1, :] *= -1
+        rotation = vt.T @ u.T
+
+    translation = target_centroid - rotation @ source_centroid
+    return rotation.astype(np.float32), translation.astype(np.float32)
 
 
 def rotation_vector_to_quaternion(rotation_vector: np.ndarray) -> np.ndarray:
@@ -267,6 +371,57 @@ def quaternion_from_rotation_matrix(rotation_matrix: np.ndarray) -> np.ndarray:
     return np.array([qx, qy, qz, qw], dtype=np.float32)
 
 
+def depth_to_pointcloud_centroid(
+    depth_image: np.ndarray,
+    intrinsic_matrix: np.ndarray,
+    corners: np.ndarray,
+) -> Optional[np.ndarray]:
+    if depth_image.ndim != 2:
+        return None
+
+    height, width = depth_image.shape
+    corners_indices = np.round(corners[0]).astype(np.int32)
+
+    if (
+        np.any(corners_indices[:, 0] < 0)
+        or np.any(corners_indices[:, 0] >= width)
+        or np.any(corners_indices[:, 1] < 0)
+        or np.any(corners_indices[:, 1] >= height)
+    ):
+        return None
+
+    x_min = int(np.min(corners_indices[:, 0]))
+    x_max = int(np.max(corners_indices[:, 0]))
+    y_min = int(np.min(corners_indices[:, 1]))
+    y_max = int(np.max(corners_indices[:, 1]))
+
+    mask = np.zeros((y_max - y_min + 1, x_max - x_min + 1), dtype=np.uint8)
+    shifted_corners = corners_indices.copy()
+    shifted_corners[:, 0] -= x_min
+    shifted_corners[:, 1] -= y_min
+    cv2.fillConvexPoly(mask, shifted_corners, 1)
+
+    depth_roi = depth_image[y_min: y_max + 1, x_min: x_max + 1]
+    valid_mask = (mask == 1) & (depth_roi > 0)
+    if not np.any(valid_mask):
+        return None
+
+    ys, xs = np.nonzero(valid_mask)
+    raw_depths = depth_roi[valid_mask].astype(np.float32)
+    if np.issubdtype(depth_image.dtype, np.integer):
+        depths = raw_depths * 0.001
+    else:
+        depths = raw_depths
+
+    u = xs.astype(np.float32) + x_min
+    v = ys.astype(np.float32) + y_min
+
+    x = (u - intrinsic_matrix[0, 2]) * depths / intrinsic_matrix[0, 0]
+    y = (v - intrinsic_matrix[1, 2]) * depths / intrinsic_matrix[1, 1]
+
+    return np.array([np.mean(x), np.mean(y), np.mean(depths)], dtype=np.float32)
+
+
 def compute_reprojection_error(
     object_points: np.ndarray,
     image_points: np.ndarray,
@@ -308,5 +463,13 @@ def _empty_board_observations() -> tuple[np.ndarray, np.ndarray, list[int]]:
     return (
         np.empty((0, 3), dtype=np.float32),
         np.empty((0, 2), dtype=np.float32),
+        [],
+    )
+
+
+def _empty_depth_observations() -> tuple[np.ndarray, np.ndarray, list[int]]:
+    return (
+        np.empty((0, 3), dtype=np.float32),
+        np.empty((0, 3), dtype=np.float32),
         [],
     )
