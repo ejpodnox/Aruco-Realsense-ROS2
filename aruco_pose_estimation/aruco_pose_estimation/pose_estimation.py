@@ -6,8 +6,7 @@
 # Python imports
 import numpy as np
 import cv2
-import tf_transformations
-from typing import Optional
+from typing import Any, Optional
 
 # ROS2 imports
 from rclpy.impl import rcutils_logger
@@ -18,15 +17,25 @@ from geometry_msgs.msg import PoseArray
 from aruco_interfaces.msg import ArucoMarkers
 
 # utils import python code
-from aruco_pose_estimation.utils import aruco_display
+from aruco_pose_estimation.board_fusion import (
+    BoardConfiguration,
+    BoardFusionStatus,
+    estimate_fused_board_pose,
+    rotation_vector_to_quaternion,
+)
+from aruco_pose_estimation.utils import aruco_display, draw_text_block
 
 # Reuse a single logger to avoid recreating it every frame
 logger = rcutils_logger.RcutilsLogger(name="aruco_node")
 
 
-def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: cv2.aruco.ArucoDetector, marker_size: float,
-                    matrix_coefficients: np.array, distortion_coefficients: np.array,
-                    pose_array: PoseArray, markers: ArucoMarkers) -> list[np.array, PoseArray, ArucoMarkers]:
+def pose_estimation(rgb_frame: np.ndarray, depth_frame: Optional[np.ndarray], aruco_detector: Optional[Any], marker_size: float,
+                    matrix_coefficients: np.ndarray, distortion_coefficients: np.ndarray,
+                    pose_array: PoseArray, markers: ArucoMarkers,
+                    aruco_dictionary: Optional[Any] = None, aruco_parameters: Optional[Any] = None,
+                    board_config: Optional[BoardConfiguration] = None,
+                    board_min_markers: int = 2,
+                    board_pose_refine: bool = True) -> tuple[np.ndarray, PoseArray, ArucoMarkers, Optional[BoardFusionStatus]]:
     '''
     rgb_frame - Frame from the RGB camera stream
     depth_frame - Depth frame from the depth camera stream
@@ -49,9 +58,23 @@ def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: 
     detection_frame = rgb_frame
     if rgb_frame.ndim == 3 and rgb_frame.shape[2] == 3:
         detection_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
-    corners, marker_ids, rejected = aruco_detector.detectMarkers(image=detection_frame)
+    # Support both APIs:
+    # - OpenCV >= 4.7 style: cv2.aruco.ArucoDetector
+    # - OpenCV legacy style: cv2.aruco.detectMarkers
+    if aruco_detector is not None and hasattr(aruco_detector, "detectMarkers"):
+        corners, marker_ids, rejected = aruco_detector.detectMarkers(image=detection_frame)
+    else:
+        if aruco_dictionary is None or aruco_parameters is None:
+            raise ValueError("Legacy OpenCV ArUco API requires dictionary and detector parameters.")
+        corners, marker_ids, rejected = cv2.aruco.detectMarkers(
+            detection_frame,
+            aruco_dictionary,
+            parameters=aruco_parameters,
+        )
 
     frame_processed = rgb_frame
+
+    board_status = None
 
     # If markers are detected
     if len(corners) > 0:
@@ -113,7 +136,26 @@ def pose_estimation(rgb_frame: np.array, depth_frame: np.array, aruco_detector: 
             markers.poses.append(pose)
             markers.marker_ids.append(marker_id[0])
 
-    return frame_processed, pose_array, markers
+    if board_config is not None:
+        board_status = estimate_fused_board_pose(
+            corners=corners,
+            marker_ids=marker_ids,
+            board_config=board_config,
+            camera_matrix=matrix_coefficients,
+            distortion_coefficients=distortion_coefficients,
+            min_markers=board_min_markers,
+            refine=board_pose_refine,
+        )
+
+        frame_processed = draw_board_fusion_status(
+            image=frame_processed,
+            board_status=board_status,
+            marker_size=marker_size,
+            camera_matrix=matrix_coefficients,
+            distortion_coefficients=distortion_coefficients,
+        )
+
+    return frame_processed, pose_array, markers, board_status
 
 
 def my_estimatePoseSingleMarkers(corners, marker_size, camera_matrix, distortion) -> tuple[np.array, np.array, np.array]:
@@ -138,14 +180,7 @@ def my_estimatePoseSingleMarkers(corners, marker_size, camera_matrix, distortion
     rvec = rvec.reshape(3, 1)
     tvec = tvec.reshape(3, 1)
        
-    rot, jacobian = cv2.Rodrigues(rvec)
-    rot_matrix = np.eye(4, dtype=np.float32)
-    rot_matrix[0:3, 0:3] = rot
-
-    # convert rotation matrix to quaternion
-    quaternion = tf_transformations.quaternion_from_matrix(rot_matrix)
-    norm_quat = np.linalg.norm(quaternion)
-    quaternion = quaternion / norm_quat
+    quaternion = rotation_vector_to_quaternion(rvec)
 
     return tvec, rvec, quaternion
 
@@ -211,3 +246,38 @@ def depth_to_pointcloud_centroid(depth_image: np.array, intrinsic_matrix: np.arr
     centroid = np.array([np.mean(x), np.mean(y), np.mean(depths)], dtype=np.float32)
 
     return centroid
+
+
+def draw_board_fusion_status(
+    image: np.ndarray,
+    board_status: BoardFusionStatus,
+    marker_size: float,
+    camera_matrix: np.ndarray,
+    distortion_coefficients: np.ndarray,
+) -> np.ndarray:
+    lines = [
+        "Board fusion: {}/{} markers".format(
+            len(board_status.visible_marker_ids),
+            board_status.min_required_markers,
+        ),
+        "Board IDs: {}".format(board_status.visible_marker_ids if board_status.visible_marker_ids else "[]"),
+    ]
+
+    if board_status.pose_estimate is None:
+        lines.append("Board pose unavailable")
+        return draw_text_block(image, lines)
+
+    image = cv2.drawFrameAxes(
+        image=image,
+        cameraMatrix=camera_matrix,
+        distCoeffs=distortion_coefficients,
+        rvec=board_status.pose_estimate.rotation_vector,
+        tvec=board_status.pose_estimate.translation.reshape(3, 1),
+        length=max(marker_size * 2.0, 0.05),
+        thickness=4,
+    )
+
+    if board_status.pose_estimate.reprojection_error is not None:
+        lines.append("Board RMS: {:.3f}px".format(board_status.pose_estimate.reprojection_error))
+
+    return draw_text_block(image, lines)

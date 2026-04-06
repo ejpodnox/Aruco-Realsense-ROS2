@@ -1,12 +1,12 @@
 # ROS2 imports
-from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, TextSubstitution, AndSubstitution, NotSubstitution
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, AndSubstitution, NotSubstitution
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch_ros.substitutions import FindPackageShare
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -18,7 +18,7 @@ def generate_launch_description():
     aruco_params_file = os.path.join(
         get_package_share_directory('aruco_pose_estimation'),
         'config',
-        'aruco_parameters_kinova.yaml'
+        'aruco_parameters.yaml'
     )
 
     with open(aruco_params_file, 'r') as file:
@@ -39,6 +39,38 @@ def generate_launch_description():
         description='ID of the aruco dictionary to use',
     )
 
+    enable_board_fusion_arg = DeclareLaunchArgument(
+        name='enable_board_fusion',
+        default_value=str(config['enable_board_fusion']),
+        description='Enable fused pose estimation from multiple configured board markers',
+        choices=['true', 'false', 'True', 'False']
+    )
+
+    board_config_file_arg = DeclareLaunchArgument(
+        name='board_config_file',
+        default_value=config['board_config_file'],
+        description='Path to the rigid board marker layout YAML file',
+    )
+
+    board_pose_topic_arg = DeclareLaunchArgument(
+        name='board_pose_topic',
+        default_value=config['board_pose_topic'],
+        description='Topic to publish the fused rigid board pose',
+    )
+
+    board_min_markers_arg = DeclareLaunchArgument(
+        name='board_min_markers',
+        default_value=str(config['board_min_markers']),
+        description='Minimum number of visible configured board markers for fused pose publication',
+    )
+
+    board_pose_refine_arg = DeclareLaunchArgument(
+        name='board_pose_refine',
+        default_value=str(config['board_pose_refine']),
+        description='Refine the fused board pose after RANSAC when OpenCV supports it',
+        choices=['true', 'false', 'True', 'False']
+    )
+
     image_topic_arg = DeclareLaunchArgument(
         name='image_topic',
         default_value=config['image_topic'],
@@ -57,6 +89,18 @@ def generate_launch_description():
         default_value='false',
         description='Launch RealSense camera automatically',
         choices=['true', 'false', 'True', 'False']
+    )
+
+    camera_name_arg = DeclareLaunchArgument(
+        name='camera_name',
+        default_value='camera',
+        description='RealSense camera_name used when launching the camera',
+    )
+
+    camera_namespace_arg = DeclareLaunchArgument(
+        name='camera_namespace',
+        default_value='',
+        description='RealSense camera_namespace used when launching the camera',
     )
 
     depth_image_topic_arg = DeclareLaunchArgument(
@@ -101,6 +145,11 @@ def generate_launch_description():
         parameters=[{
             "marker_size": LaunchConfiguration('marker_size'),
             "aruco_dictionary_id": LaunchConfiguration('aruco_dictionary_id'),
+            "enable_board_fusion": LaunchConfiguration('enable_board_fusion'),
+            "board_config_file": LaunchConfiguration('board_config_file'),
+            "board_pose_topic": LaunchConfiguration('board_pose_topic'),
+            "board_min_markers": LaunchConfiguration('board_min_markers'),
+            "board_pose_refine": LaunchConfiguration('board_pose_refine'),
             "image_topic": LaunchConfiguration('image_topic'),
             "use_depth_input": LaunchConfiguration('use_depth_input'),
             "depth_image_topic": LaunchConfiguration('depth_image_topic'),
@@ -128,8 +177,15 @@ def generate_launch_description():
             "align_depth.enable": "true",
             "enable_color": "true",
             "enable_depth": "true",
+            "camera_name": LaunchConfiguration('camera_name'),
+            "camera_namespace": LaunchConfiguration('camera_namespace'),
         }.items(),
-        condition=IfCondition(LaunchConfiguration('launch_camera'))
+        condition=IfCondition(
+            AndSubstitution(
+                LaunchConfiguration('launch_camera'),
+                LaunchConfiguration('use_depth_input')
+            )
+        )
     )
 
     camera_feed_node = IncludeLaunchDescription(
@@ -138,8 +194,15 @@ def generate_launch_description():
             "pointcloud.enable": "false",
             "enable_color": "true",
             "rgb_camera.color_profile": "640x480x15",  # Lower resolution and framerate
+            "camera_name": LaunchConfiguration('camera_name'),
+            "camera_namespace": LaunchConfiguration('camera_namespace'),
         }.items(),
-        condition=IfCondition(LaunchConfiguration('launch_camera'))
+        condition=IfCondition(
+            AndSubstitution(
+                LaunchConfiguration('launch_camera'),
+                NotSubstitution(LaunchConfiguration('use_depth_input'))
+            )
+        )
     )
 
     rviz_file = PathJoinSubstitution([
@@ -158,9 +221,16 @@ def generate_launch_description():
         # Arguments
         marker_size_arg,
         aruco_dictionary_id_arg,
+        enable_board_fusion_arg,
+        board_config_file_arg,
+        board_pose_topic_arg,
+        board_min_markers_arg,
+        board_pose_refine_arg,
         image_topic_arg,
         use_depth_input_arg,
         launch_camera_arg,
+        camera_name_arg,
+        camera_namespace_arg,
         depth_image_topic_arg,
         camera_info_topic_arg,
         camera_frame_arg,

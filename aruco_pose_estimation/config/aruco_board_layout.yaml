@@ -1,0 +1,9 @@
+aruco_board:
+  frame_name: board
+  markers:
+    - id: 0
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
+    - id: 1
+      xyz: [0.08, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]

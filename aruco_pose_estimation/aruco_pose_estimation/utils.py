@@ -70,3 +70,17 @@ def aruco_display(corners, ids, image):
 
     return image
 
+
+def draw_text_block(image, lines, origin=(10, 25), color=(255, 255, 0), line_height=22):
+    for index, line in enumerate(lines):
+        cv2.putText(
+            image,
+            line,
+            (origin[0], origin[1] + index * line_height),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+        )
+
+    return image

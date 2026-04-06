@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 ROS2 wrapper code taken from:
 https://github.com/JMU-ROBOTICS-VIVA/ros2_aruco/tree/main
@@ -39,21 +39,24 @@ Version: 2024-01-29
 import rclpy
 import rclpy.node
 from rclpy.qos import qos_profile_sensor_data
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 import message_filters
 
 # Python imports
 import numpy as np
 import cv2
+import os
 
 # Local imports for custom defined functions
+from aruco_pose_estimation.board_fusion import load_board_configuration
 from aruco_pose_estimation.utils import ARUCO_DICT
 from aruco_pose_estimation.pose_estimation import pose_estimation
 
 # ROS2 message imports
 from sensor_msgs.msg import CameraInfo
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import PoseArray
+from geometry_msgs.msg import PoseArray, PoseStamped
 from aruco_interfaces.msg import ArucoMarkers
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 
@@ -112,20 +115,44 @@ class ArucoNode(rclpy.node.Node):
         self.poses_pub = self.create_publisher(PoseArray, self.markers_visualization_topic, 10)
         self.markers_pub = self.create_publisher(ArucoMarkers, self.detected_markers_topic, 10)
         self.image_pub = self.create_publisher(Image, self.output_image_topic, 10)
+        self.board_pose_pub = None
+
+        if self.enable_board_fusion:
+            try:
+                board_config_path = self.resolve_board_config_path(self.board_config_file)
+                self.board_config = load_board_configuration(board_config_path, self.marker_size)
+            except ValueError as exc:
+                raise RuntimeError(f"Invalid board fusion configuration: {exc}") from exc
+
+            self.board_pose_pub = self.create_publisher(PoseStamped, self.board_pose_topic, 10)
+            self.get_logger().info(
+                "Board fusion enabled for frame '%s' with markers %s" % (
+                    self.board_config.frame_name,
+                    sorted(self.board_config.markers.keys()),
+                )
+            )
+        else:
+            self.board_config = None
 
         # Set up fields for camera parameters
         self.info_msg = None
         self.intrinsic_mat = None
         self.distortion = None
 
-        # code for updated version of cv2 (4.7.0)
-        self.aruco_dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
-        self.aruco_parameters = cv2.aruco.DetectorParameters()
-        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dictionary, self.aruco_parameters)
+        # Build detector in a way that works across OpenCV ArUco API versions.
+        if hasattr(cv2.aruco, "getPredefinedDictionary"):
+            self.aruco_dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
+        else:
+            self.aruco_dictionary = cv2.aruco.Dictionary_get(dictionary_id)
 
-        # old code version
-        # self.aruco_dictionary = cv2.aruco.Dictionary_get(dictionary_id)
-        # self.aruco_parameters = cv2.aruco.DetectorParameters_create()
+        if hasattr(cv2.aruco, "ArucoDetector") and hasattr(cv2.aruco, "DetectorParameters"):
+            self.aruco_parameters = cv2.aruco.DetectorParameters()
+            self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dictionary, self.aruco_parameters)
+            self.get_logger().info("Using OpenCV ArUcoDetector API.")
+        else:
+            self.aruco_parameters = cv2.aruco.DetectorParameters_create()
+            self.aruco_detector = None
+            self.get_logger().info("Using legacy OpenCV ArUco detectMarkers API.")
 
         self.bridge = CvBridge()
 
@@ -150,44 +177,7 @@ class ArucoNode(rclpy.node.Node):
 
         # convert the image messages to cv2 format
         cv_image = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding="rgb8")
-
-        # create the ArucoMarkers and PoseArray messages
-        markers = ArucoMarkers()
-        pose_array = PoseArray()
-
-        # Set the frame id and timestamp for the markers and pose array
-        if self.camera_frame == "":
-            markers.header.frame_id = self.info_msg.header.frame_id
-            pose_array.header.frame_id = self.info_msg.header.frame_id
-        else:
-            markers.header.frame_id = self.camera_frame
-            pose_array.header.frame_id = self.camera_frame
-
-        markers.header.stamp = img_msg.header.stamp
-        pose_array.header.stamp = img_msg.header.stamp
-
-        """
-        # OVERRIDE: use calibrated intrinsic matrix and distortion coefficients
-        self.intrinsic_mat = np.reshape([615.95431, 0., 325.26983,
-                                         0., 617.92586, 257.57722,
-                                         0., 0., 1.], (3, 3))
-        self.distortion = np.array([0.142588, -0.311967, 0.003950, -0.006346, 0.000000])
-        """
-        
-        # call the pose estimation function
-        frame, pose_array, markers = pose_estimation(rgb_frame=cv_image, depth_frame=None,
-                                                     aruco_detector=self.aruco_detector,
-                                                     marker_size=self.marker_size, matrix_coefficients=self.intrinsic_mat,
-                                                     distortion_coefficients=self.distortion, pose_array=pose_array, markers=markers)
-
-        # if some markers are detected
-        if len(markers.marker_ids) > 0:
-            # Publish the results with the poses and markes positions
-            self.poses_pub.publish(pose_array)
-            self.markers_pub.publish(markers)
-
-        # publish the image frame with computed markers positions over the image
-        self.image_pub.publish(self.bridge.cv2_to_imgmsg(frame, "rgb8"))
+        self.process_frame(cv_image, None, img_msg.header.stamp)
 
     def depth_image_callback(self, depth_msg: Image):
         if self.info_msg is None:
@@ -195,40 +185,85 @@ class ArucoNode(rclpy.node.Node):
             return
 
     def rgb_depth_sync_callback(self, rgb_msg: Image, depth_msg: Image):
+        if self.info_msg is None:
+            self.get_logger().warn("No camera info has been received!")
+            return
 
         # convert the image messages to cv2 format
         cv_depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="16UC1")
         cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="rgb8")
+        self.process_frame(cv_image, cv_depth_image, rgb_msg.header.stamp)
 
-        # create the ArucoMarkers and PoseArray messages
-        markers = ArucoMarkers()
-        pose_array = PoseArray()
+    def process_frame(self, rgb_image: np.ndarray, depth_image: np.ndarray, stamp):
+        markers, pose_array = self.create_marker_messages(stamp)
 
-        # Set the frame id and timestamp for the markers and pose array
-        if self.camera_frame == "":
-            markers.header.frame_id = self.info_msg.header.frame_id
-            pose_array.header.frame_id = self.info_msg.header.frame_id
-        else:
-            markers.header.frame_id = self.camera_frame
-            pose_array.header.frame_id = self.camera_frame
+        frame, pose_array, markers, board_status = pose_estimation(
+            rgb_frame=rgb_image,
+            depth_frame=depth_image,
+            aruco_detector=self.aruco_detector,
+            marker_size=self.marker_size,
+            matrix_coefficients=self.intrinsic_mat,
+            distortion_coefficients=self.distortion,
+            pose_array=pose_array,
+            markers=markers,
+            aruco_dictionary=self.aruco_dictionary,
+            aruco_parameters=self.aruco_parameters,
+            board_config=self.board_config,
+            board_min_markers=self.board_min_markers,
+            board_pose_refine=self.board_pose_refine,
+        )
 
-        markers.header.stamp = rgb_msg.header.stamp
-        pose_array.header.stamp = rgb_msg.header.stamp
-
-        # call the pose estimation function
-        frame, pose_array, markers = pose_estimation(rgb_frame=cv_image, depth_frame=cv_depth_image,
-                                                     aruco_detector=self.aruco_detector,
-                                                     marker_size=self.marker_size, matrix_coefficients=self.intrinsic_mat,
-                                                     distortion_coefficients=self.distortion, pose_array=pose_array, markers=markers)
-
-        # if some markers are detected
         if len(markers.marker_ids) > 0:
-            # Publish the results with the poses and markes positions
             self.poses_pub.publish(pose_array)
             self.markers_pub.publish(markers)
 
-        # publish the image frame with computed markers positions over the image
+        if self.board_pose_pub is not None and board_status is not None and board_status.pose_estimate is not None:
+            self.board_pose_pub.publish(self.create_board_pose_message(stamp, board_status.pose_estimate))
+
         self.image_pub.publish(self.bridge.cv2_to_imgmsg(frame, "rgb8"))
+
+    def create_marker_messages(self, stamp):
+        markers = ArucoMarkers()
+        pose_array = PoseArray()
+
+        frame_id = self.resolve_output_frame_id()
+        markers.header.frame_id = frame_id
+        pose_array.header.frame_id = frame_id
+        markers.header.stamp = stamp
+        pose_array.header.stamp = stamp
+        return markers, pose_array
+
+    def create_board_pose_message(self, stamp, pose_estimate):
+        message = PoseStamped()
+        message.header.frame_id = self.resolve_output_frame_id()
+        message.header.stamp = stamp
+        message.pose.position.x = float(pose_estimate.translation[0])
+        message.pose.position.y = float(pose_estimate.translation[1])
+        message.pose.position.z = float(pose_estimate.translation[2])
+        message.pose.orientation.x = float(pose_estimate.quaternion[0])
+        message.pose.orientation.y = float(pose_estimate.quaternion[1])
+        message.pose.orientation.z = float(pose_estimate.quaternion[2])
+        message.pose.orientation.w = float(pose_estimate.quaternion[3])
+        return message
+
+    def resolve_output_frame_id(self):
+        if self.camera_frame == "":
+            return self.info_msg.header.frame_id
+        return self.camera_frame
+
+    def resolve_board_config_path(self, config_path: str) -> str:
+        expanded_path = os.path.expanduser(config_path.strip())
+        if os.path.isabs(expanded_path):
+            return expanded_path
+
+        if os.path.exists(expanded_path):
+            return os.path.abspath(expanded_path)
+
+        package_relative_path = os.path.join(
+            get_package_share_directory("aruco_pose_estimation"),
+            expanded_path,
+        )
+        return package_relative_path
 
     def initialize_parameters(self):
         # Declare and read parameters from aruco_params.yaml
@@ -322,6 +357,51 @@ class ArucoNode(rclpy.node.Node):
             ),
         )
 
+        self.declare_parameter(
+            name="enable_board_fusion",
+            value=False,
+            descriptor=ParameterDescriptor(
+                type=ParameterType.PARAMETER_BOOL,
+                description="Enable fused rigid-board pose estimation from multiple configured markers.",
+            ),
+        )
+
+        self.declare_parameter(
+            name="board_config_file",
+            value="",
+            descriptor=ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="Path to the rigid board marker layout YAML file.",
+            ),
+        )
+
+        self.declare_parameter(
+            name="board_pose_topic",
+            value="/aruco/board_pose",
+            descriptor=ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="Topic to publish the fused rigid-board pose.",
+            ),
+        )
+
+        self.declare_parameter(
+            name="board_min_markers",
+            value=2,
+            descriptor=ParameterDescriptor(
+                type=ParameterType.PARAMETER_INTEGER,
+                description="Minimum number of configured markers required before publishing a fused board pose.",
+            ),
+        )
+
+        self.declare_parameter(
+            name="board_pose_refine",
+            value=True,
+            descriptor=ParameterDescriptor(
+                type=ParameterType.PARAMETER_BOOL,
+                description="Refine the fused board pose after RANSAC using Levenberg-Marquardt when OpenCV supports it.",
+            ),
+        )
+
         # read parameters from aruco_params.yaml and store them
         self.marker_size = (
             self.get_parameter("marker_size").get_parameter_value().double_value
@@ -370,6 +450,36 @@ class ArucoNode(rclpy.node.Node):
         self.output_image_topic = (
             self.get_parameter("output_image_topic").get_parameter_value().string_value
         )
+
+        self.enable_board_fusion = (
+            self.get_parameter("enable_board_fusion").get_parameter_value().bool_value
+        )
+        self.get_logger().info(f"Enable board fusion: {self.enable_board_fusion}")
+
+        self.board_config_file = (
+            self.get_parameter("board_config_file").get_parameter_value().string_value
+        )
+        self.get_logger().info(f"Board config file: {self.board_config_file}")
+
+        self.board_pose_topic = (
+            self.get_parameter("board_pose_topic").get_parameter_value().string_value
+        )
+
+        self.board_min_markers = (
+            self.get_parameter("board_min_markers").get_parameter_value().integer_value
+        )
+        self.get_logger().info(f"Board minimum visible markers: {self.board_min_markers}")
+
+        self.board_pose_refine = (
+            self.get_parameter("board_pose_refine").get_parameter_value().bool_value
+        )
+        self.get_logger().info(f"Board pose refine: {self.board_pose_refine}")
+
+        if self.enable_board_fusion and self.board_config_file.strip() == "":
+            raise RuntimeError(
+                "Board fusion is enabled but 'board_config_file' is empty. "
+                "Set it to a valid rigid board YAML file."
+            )
 
 
 def main():
