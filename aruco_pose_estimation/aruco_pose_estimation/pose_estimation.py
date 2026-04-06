@@ -126,15 +126,15 @@ def pose_estimation(rgb_frame: np.ndarray, depth_frame: Optional[np.ndarray], ar
                 pose.position.y = float(tvec[1])
                 pose.position.z = float(tvec[2])
 
-            pose.orientation.x = quat[0]
-            pose.orientation.y = quat[1]
-            pose.orientation.z = quat[2]
-            pose.orientation.w = quat[3]
+            pose.orientation.x = float(quat[0])
+            pose.orientation.y = float(quat[1])
+            pose.orientation.z = float(quat[2])
+            pose.orientation.w = float(quat[3])
 
             # add the pose and marker id to the pose_array and markers messages
             pose_array.poses.append(pose)
             markers.poses.append(pose)
-            markers.marker_ids.append(marker_id[0])
+            markers.marker_ids.append(int(marker_id[0]))
 
     if board_config is not None:
         board_status = estimate_fused_board_pose(
